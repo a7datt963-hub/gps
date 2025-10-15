@@ -7,7 +7,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 🔹 تحميل المتغيرات البيئية
+// 🔹 المتغيرات البيئية
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const GOOGLE_SERVICE_ACCOUNT_EMAIL = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
 const GOOGLE_PRIVATE_KEY = process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n');
@@ -15,7 +15,7 @@ const RADIUS = Number(process.env.RADIUS || 50);
 const RESTAURANT_LAT = Number(process.env.RESTAURANT_LAT);
 const RESTAURANT_LON = Number(process.env.RESTAURANT_LON);
 
-// 🔐 إعداد المصادقة عبر JWT
+// 🔐 المصادقة على Google Sheets
 const serviceAccountAuth = new JWT({
   email: GOOGLE_SERVICE_ACCOUNT_EMAIL,
   key: GOOGLE_PRIVATE_KEY,
@@ -31,15 +31,15 @@ async function accessSheet() {
   return sheet;
 }
 
-// 🔹 دالة لحساب المسافة بالمتر بين نقطتين
+// 🔹 حساب المسافة بالمتر
 function getDistance(lat1, lon1, lat2, lon2) {
-  const R = 6371e3; // نصف قطر الأرض بالمتر
+  const R = 6371e3;
   const φ1 = lat1 * Math.PI / 180;
   const φ2 = lat2 * Math.PI / 180;
   const Δφ = (lat2 - lat1) * Math.PI / 180;
   const Δλ = (lon2 - lon1) * Math.PI / 180;
-  const a = Math.sin(Δφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  const a = Math.sin(Δφ/2)**2 + Math.cos(φ1)*Math.cos(φ2)*Math.sin(Δλ/2)**2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
   return R * c;
 }
 
@@ -57,54 +57,59 @@ app.post("/attendance", async (req, res) => {
 
     const sheet = await accessSheet();
     const rows = await sheet.getRows();
-
-    const now = new Date();
-    const today = now.toISOString().slice(0, 10);
-    const timeNow = now.toTimeString().slice(0, 8);
+    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const timeNow = new Date().toTimeString().slice(0, 8); // HH:MM:SS
 
     if (mode === "in") {
-      // البحث عن أي صف مفتوح لنفس الاسم
-      const openRow = rows
-        .filter(r => r.name?.trim().toLowerCase() === name.trim().toLowerCase())
-        .find(r => !r.out_time);
+      // البحث عن تسجيل دخول اليوم لنفس الاسم
+      const todayRow = rows.find(r =>
+        r.name?.trim().toLowerCase() === name.trim().toLowerCase() &&
+        r.date === today
+      );
 
-      if (openRow) return res.json({ message: "✅ تم تسجيل دخولك مسبقاً اليوم." });
+      if (todayRow) return res.json({ message: "✅ تم تسجيل دخولك مسبقاً اليوم." });
 
-      await sheet.addRow({ name, date: today, in_time: timeNow, out_time: "", work_duration: "" });
+      await sheet.addRow({
+        name,
+        date: today,
+        in_time: timeNow,
+        out_time: "",
+        work_duration: ""
+      });
+
       return res.json({ message: "✅ تم تسجيل دخولك بنجاح." });
     }
 
     if (mode === "out") {
-      // البحث عن آخر صف مفتوح لنفس الاسم
+      // البحث عن آخر صف مفتوح (اسم، in_time موجود، out_time فارغ)
       const openRow = rows
         .filter(r => r.name?.trim().toLowerCase() === name.trim().toLowerCase())
         .reverse()
-        .find(r => !r.out_time);
+        .find(r => r.in_time && (!r.out_time || r.out_time.trim() === ""));
 
       if (!openRow) return res.json({ message: "⚠️ لم تسجل دخولك مسبقاً." });
 
       openRow.out_time = timeNow;
 
       // حساب مدة العمل
-      if (openRow.in_time) {
-        const [hIn, mIn] = openRow.in_time.split(":").map(Number);
-        const [hOut, mOut] = timeNow.split(":").map(Number);
-        const duration = ((hOut * 60 + mOut) - (hIn * 60 + mIn)) / 60;
-        openRow.work_duration = duration.toFixed(2) + " ساعة";
-      }
+      const [hIn, mIn] = openRow.in_time.split(":").map(Number);
+      const [hOut, mOut] = timeNow.split(":").map(Number);
+      const duration = ((hOut * 60 + mOut) - (hIn * 60 + mIn)) / 60;
+      openRow.work_duration = duration.toFixed(2) + " ساعة";
 
       await openRow.save();
       return res.json({ message: "👋 تم تسجيل خروجك رافقتك السلامة." });
     }
 
     res.json({ message: "❌ وضع غير معروف." });
+
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "❌ حدث خطأ في السيرفر." });
   }
 });
 
-// 🔹 فحص سريع للسيرفر
+// 🔹 فحص سريع
 app.get("/", (req, res) => res.send("✅ Attendance Server Running..."));
 
 const PORT = process.env.PORT || 3000;
