@@ -33,13 +33,13 @@ async function accessSheet() {
 
 // 🔹 دالة لحساب المسافة بالمتر بين نقطتين
 function getDistance(lat1, lon1, lat2, lon2) {
-  const R = 6371e3;
-  const φ1 = lat1 * Math.PI/180;
-  const φ2 = lat2 * Math.PI/180;
-  const Δφ = (lat2-lat1) * Math.PI/180;
-  const Δλ = (lon2-lon1) * Math.PI/180;
-  const a = Math.sin(Δφ/2)**2 + Math.cos(φ1)*Math.cos(φ2)*Math.sin(Δλ/2)**2;
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  const R = 6371e3; // نصف قطر الأرض بالمتر
+  const φ1 = lat1 * Math.PI / 180;
+  const φ2 = lat2 * Math.PI / 180;
+  const Δφ = (lat2 - lat1) * Math.PI / 180;
+  const Δλ = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(Δφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
 }
 
@@ -58,35 +58,42 @@ app.post("/attendance", async (req, res) => {
     const sheet = await accessSheet();
     const rows = await sheet.getRows();
 
-    const today = new Date().toISOString().slice(0, 10);
-    const timeNow = new Date().toTimeString().slice(0, 8);
-
-    // البحث عن الاسم اليوم
-    const existing = rows.find(r =>
-      r.name?.trim().toLowerCase() === name.trim().toLowerCase() &&
-      r.date === today
-    );
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
+    const timeNow = now.toTimeString().slice(0, 8);
 
     if (mode === "in") {
-      if (existing) return res.json({ message: "✅ تم تسجيل دخولك مسبقاً اليوم." });
+      // البحث عن أي صف مفتوح لنفس الاسم
+      const openRow = rows
+        .filter(r => r.name?.trim().toLowerCase() === name.trim().toLowerCase())
+        .find(r => !r.out_time);
+
+      if (openRow) return res.json({ message: "✅ تم تسجيل دخولك مسبقاً اليوم." });
+
       await sheet.addRow({ name, date: today, in_time: timeNow, out_time: "", work_duration: "" });
       return res.json({ message: "✅ تم تسجيل دخولك بنجاح." });
     }
 
     if (mode === "out") {
-      if (!existing) return res.json({ message: "⚠️ لم تسجل دخولك اليوم." });
-      if (existing.out_time) return res.json({ message: "✅ تم تسجيل خروجك مسبقاً." });
+      // البحث عن آخر صف مفتوح لنفس الاسم
+      const openRow = rows
+        .filter(r => r.name?.trim().toLowerCase() === name.trim().toLowerCase())
+        .reverse()
+        .find(r => !r.out_time);
 
-      existing.out_time = timeNow;
+      if (!openRow) return res.json({ message: "⚠️ لم تسجل دخولك مسبقاً." });
+
+      openRow.out_time = timeNow;
 
       // حساب مدة العمل
-      if (existing.in_time) {
-        const [hIn, mIn] = existing.in_time.split(":").map(Number);
+      if (openRow.in_time) {
+        const [hIn, mIn] = openRow.in_time.split(":").map(Number);
         const [hOut, mOut] = timeNow.split(":").map(Number);
         const duration = ((hOut * 60 + mOut) - (hIn * 60 + mIn)) / 60;
-        existing.work_duration = duration.toFixed(2) + " ساعة";
+        openRow.work_duration = duration.toFixed(2) + " ساعة";
       }
-      await existing.save();
+
+      await openRow.save();
       return res.json({ message: "👋 تم تسجيل خروجك رافقتك السلامة." });
     }
 
