@@ -7,7 +7,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 🧠 تحميل المتغيرات البيئية من Render
+// 🔹 تحميل المتغيرات البيئية من Render
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const GOOGLE_SERVICE_ACCOUNT_EMAIL = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
 const GOOGLE_PRIVATE_KEY = process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n');
@@ -19,7 +19,7 @@ const serviceAccountAuth = new JWT({
   scopes: ["https://www.googleapis.com/auth/spreadsheets"],
 });
 
-// 📄 الوصول إلى الشيت
+// 📄 دالة للوصول إلى أول ورقة في الشيت
 async function accessSheet() {
   const doc = new GoogleSpreadsheet(SPREADSHEET_ID, serviceAccountAuth);
   await doc.loadInfo();
@@ -35,11 +35,17 @@ app.post("/attendance", async (req, res) => {
 
     const sheet = await accessSheet();
     const now = new Date();
-    const today = now.toLocaleDateString("en-CA");
+    const today = now.toLocaleDateString("en-CA"); // YYYY-MM-DD
     const timeNow = now.toLocaleTimeString("ar-SA", { hour12: false });
 
     const rows = await sheet.getRows();
-    const existing = rows.find(r => r.name === name && r.date === today);
+
+    // ✅ البحث عن الصف بناءً على الاسم والتاريخ مع تجاهل الحروف والمسافات
+    const existing = rows.find(
+      r =>
+        r.name?.trim().toLowerCase() === name.trim().toLowerCase() &&
+        r.date?.toString().includes(today)
+    );
 
     if (mode === "in") {
       if (existing) return res.json({ message: "✅ تم تسجيل دخولك مسبقاً اليوم." });
@@ -63,6 +69,7 @@ app.post("/attendance", async (req, res) => {
 
       existing.out_time = timeNow;
 
+      // حساب مدة العمل
       const [hIn, mIn] = existing.in_time.split(":").map(Number);
       const [hOut, mOut] = timeNow.split(":").map(Number);
       const duration = ((hOut * 60 + mOut) - (hIn * 60 + mIn)) / 60;
@@ -80,7 +87,7 @@ app.post("/attendance", async (req, res) => {
   }
 });
 
-// 🔍 فحص سريع
+// 🔍 اختبار سريع للسيرفر
 app.get("/", (req, res) => res.send("✅ Attendance Server Running..."));
 
 const PORT = process.env.PORT || 3000;
