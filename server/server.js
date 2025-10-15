@@ -7,19 +7,22 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 🔹 متغيرات البيئة
+// 🔹 تحميل المتغيرات البيئية
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const GOOGLE_SERVICE_ACCOUNT_EMAIL = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
 const GOOGLE_PRIVATE_KEY = process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n');
+const RADIUS = Number(process.env.RADIUS || 50);
+const RESTAURANT_LAT = Number(process.env.RESTAURANT_LAT);
+const RESTAURANT_LON = Number(process.env.RESTAURANT_LON);
 
-// 🔐 إعداد المصادقة
+// 🔐 إعداد المصادقة عبر JWT
 const serviceAccountAuth = new JWT({
   email: GOOGLE_SERVICE_ACCOUNT_EMAIL,
   key: GOOGLE_PRIVATE_KEY,
   scopes: ["https://www.googleapis.com/auth/spreadsheets"],
 });
 
-// 📄 الوصول للشيت
+// 📄 دالة للوصول إلى الشيت
 async function accessSheet() {
   const doc = new GoogleSpreadsheet(SPREADSHEET_ID, serviceAccountAuth);
   await doc.loadInfo();
@@ -28,36 +31,45 @@ async function accessSheet() {
   return sheet;
 }
 
-// 🕒 API تسجيل الدخول والخروج
+// 🔹 دالة لحساب المسافة بالمتر بين نقطتين
+function getDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371e3;
+  const φ1 = lat1 * Math.PI/180;
+  const φ2 = lat2 * Math.PI/180;
+  const Δφ = (lat2-lat1) * Math.PI/180;
+  const Δλ = (lon2-lon1) * Math.PI/180;
+  const a = Math.sin(Δφ/2)**2 + Math.cos(φ1)*Math.cos(φ2)*Math.sin(Δλ/2)**2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
+}
+
+// 🕒 API لتسجيل الدخول والخروج
 app.post("/attendance", async (req, res) => {
   try {
-    const { name, mode } = req.body;
-    if (!name || !mode)
-      return res.status(400).json({ message: "❌ الرجاء إدخال الاسم والوضع." });
+    const { name, mode, lat, lon } = req.body;
+
+    if (!name || !mode || lat === undefined || lon === undefined)
+      return res.status(400).json({ message: "❌ الرجاء إدخال الاسم والوضع والموقع." });
+
+    // 🔹 التحقق من الموقع
+    const distance = getDistance(lat, lon, RESTAURANT_LAT, RESTAURANT_LON);
+    if (distance > RADIUS) return res.json({ message: "❌ أنت لست داخل المطعم." });
 
     const sheet = await accessSheet();
     const rows = await sheet.getRows();
-    const now = new Date();
-    const today = now.toISOString().slice(0, 10); // YYYY-MM-DD
-    const timeNow = now.toTimeString().slice(0, 8); // HH:MM:SS
 
-    // 🟢 البحث عن الصف بناءً على الاسم والتاريخ
-    const existing = rows.find(r => {
-      const sheetName = r.name?.trim().toLowerCase() || r.Name?.trim().toLowerCase() || "";
-      const sheetDate = r.date?.trim() || r.Date?.trim() || "";
-      return sheetName === name.trim().toLowerCase() && sheetDate === today;
-    });
+    const today = new Date().toISOString().slice(0, 10);
+    const timeNow = new Date().toTimeString().slice(0, 8);
+
+    // البحث عن الاسم اليوم
+    const existing = rows.find(r =>
+      r.name?.trim().toLowerCase() === name.trim().toLowerCase() &&
+      r.date === today
+    );
 
     if (mode === "in") {
       if (existing) return res.json({ message: "✅ تم تسجيل دخولك مسبقاً اليوم." });
-
-      await sheet.addRow({
-        name,
-        date: today,
-        in_time: timeNow,
-        out_time: "",
-        work_duration: ""
-      });
+      await sheet.addRow({ name, date: today, in_time: timeNow, out_time: "", work_duration: "" });
       return res.json({ message: "✅ تم تسجيل دخولك بنجاح." });
     }
 
@@ -74,7 +86,6 @@ app.post("/attendance", async (req, res) => {
         const duration = ((hOut * 60 + mOut) - (hIn * 60 + mIn)) / 60;
         existing.work_duration = duration.toFixed(2) + " ساعة";
       }
-
       await existing.save();
       return res.json({ message: "👋 تم تسجيل خروجك رافقتك السلامة." });
     }
@@ -86,6 +97,7 @@ app.post("/attendance", async (req, res) => {
   }
 });
 
+// 🔹 فحص سريع للسيرفر
 app.get("/", (req, res) => res.send("✅ Attendance Server Running..."));
 
 const PORT = process.env.PORT || 3000;
