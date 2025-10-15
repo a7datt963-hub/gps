@@ -7,45 +7,46 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 🔹 تحميل المتغيرات البيئية من Render
+// 🔹 متغيرات البيئة
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const GOOGLE_SERVICE_ACCOUNT_EMAIL = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
 const GOOGLE_PRIVATE_KEY = process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n');
 
-// 🔐 إعداد المصادقة عبر JWT
+// 🔐 إعداد المصادقة
 const serviceAccountAuth = new JWT({
   email: GOOGLE_SERVICE_ACCOUNT_EMAIL,
   key: GOOGLE_PRIVATE_KEY,
   scopes: ["https://www.googleapis.com/auth/spreadsheets"],
 });
 
-// 📄 دالة للوصول إلى أول ورقة في الشيت
+// 📄 الوصول للشيت
 async function accessSheet() {
   const doc = new GoogleSpreadsheet(SPREADSHEET_ID, serviceAccountAuth);
   await doc.loadInfo();
-  return doc.sheetsByIndex[0];
+  const sheet = doc.sheetsByIndex[0];
+  await sheet.loadHeaderRow();
+  return sheet;
 }
 
-// 🕒 API لتسجيل الدخول والخروج
+// 🕒 API تسجيل الدخول والخروج
 app.post("/attendance", async (req, res) => {
   try {
-    const { name, mode, lat, lon } = req.body;
+    const { name, mode } = req.body;
     if (!name || !mode)
       return res.status(400).json({ message: "❌ الرجاء إدخال الاسم والوضع." });
 
     const sheet = await accessSheet();
-    const now = new Date();
-    const today = now.toLocaleDateString("en-CA"); // YYYY-MM-DD
-    const timeNow = now.toLocaleTimeString("ar-SA", { hour12: false });
-
     const rows = await sheet.getRows();
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10); // YYYY-MM-DD
+    const timeNow = now.toTimeString().slice(0, 8); // HH:MM:SS
 
-    // ✅ البحث عن الصف بناءً على الاسم والتاريخ مع تجاهل الحروف والمسافات
-    const existing = rows.find(
-      r =>
-        r.name?.trim().toLowerCase() === name.trim().toLowerCase() &&
-        r.date?.toString().includes(today)
-    );
+    // 🟢 البحث عن الصف بناءً على الاسم والتاريخ
+    const existing = rows.find(r => {
+      const sheetName = r.name?.trim().toLowerCase() || r.Name?.trim().toLowerCase() || "";
+      const sheetDate = r.date?.trim() || r.Date?.trim() || "";
+      return sheetName === name.trim().toLowerCase() && sheetDate === today;
+    });
 
     if (mode === "in") {
       if (existing) return res.json({ message: "✅ تم تسجيل دخولك مسبقاً اليوم." });
@@ -55,11 +56,8 @@ app.post("/attendance", async (req, res) => {
         date: today,
         in_time: timeNow,
         out_time: "",
-        work_duration: "",
-        lat_in: lat,
-        lon_in: lon
+        work_duration: ""
       });
-
       return res.json({ message: "✅ تم تسجيل دخولك بنجاح." });
     }
 
@@ -70,14 +68,15 @@ app.post("/attendance", async (req, res) => {
       existing.out_time = timeNow;
 
       // حساب مدة العمل
-      const [hIn, mIn] = existing.in_time.split(":").map(Number);
-      const [hOut, mOut] = timeNow.split(":").map(Number);
-      const duration = ((hOut * 60 + mOut) - (hIn * 60 + mIn)) / 60;
+      if (existing.in_time) {
+        const [hIn, mIn] = existing.in_time.split(":").map(Number);
+        const [hOut, mOut] = timeNow.split(":").map(Number);
+        const duration = ((hOut * 60 + mOut) - (hIn * 60 + mIn)) / 60;
+        existing.work_duration = duration.toFixed(2) + " ساعة";
+      }
 
-      existing.work_duration = duration.toFixed(2) + " ساعة";
       await existing.save();
-
-      return res.json({ message: "👋 تم تسجيل خروجك. مدة العمل: " + existing.work_duration });
+      return res.json({ message: "👋 تم تسجيل خروجك رافقتك السلامة." });
     }
 
     res.json({ message: "❌ وضع غير معروف." });
@@ -87,7 +86,6 @@ app.post("/attendance", async (req, res) => {
   }
 });
 
-// 🔍 اختبار سريع للسيرفر
 app.get("/", (req, res) => res.send("✅ Attendance Server Running..."));
 
 const PORT = process.env.PORT || 3000;
