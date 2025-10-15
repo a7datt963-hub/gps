@@ -1,100 +1,87 @@
 import express from "express";
 import cors from "cors";
-import dotenv from "dotenv";
 import { GoogleSpreadsheet } from "google-spreadsheet";
-
-dotenv.config();
+import { JWT } from "google-auth-library";
 
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.use(express.static("public"));
 
-const PORT = process.env.PORT || 3000;
-const RESTAURANT_LAT = parseFloat(process.env.RESTAURANT_LAT);
-const RESTAURANT_LON = parseFloat(process.env.RESTAURANT_LON);
-const RADIUS = parseFloat(process.env.RADIUS);
+// 🧠 تحميل المتغيرات البيئية من Render
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+const GOOGLE_SERVICE_ACCOUNT_EMAIL = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
+const GOOGLE_PRIVATE_KEY = process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n');
 
-// Google Sheets setup
-const doc = new GoogleSpreadsheet(process.env.SPREADSHEET_ID);
+// 🔐 إعداد المصادقة عبر JWT
+const serviceAccountAuth = new JWT({
+  email: GOOGLE_SERVICE_ACCOUNT_EMAIL,
+  key: GOOGLE_PRIVATE_KEY,
+  scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+});
 
+// 📄 الوصول إلى الشيت
 async function accessSheet() {
-  await doc.useServiceAccountAuth({
-    client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-    private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
-  });
+  const doc = new GoogleSpreadsheet(SPREADSHEET_ID, serviceAccountAuth);
   await doc.loadInfo();
   return doc.sheetsByIndex[0];
 }
 
-// دالة حساب المسافة (هارفيساين)
-function getDistance(lat1, lon1, lat2, lon2) {
-  const R = 6371e3;
-  const φ1 = lat1 * Math.PI / 180;
-  const φ2 = lat2 * Math.PI / 180;
-  const Δφ = (lat2 - lat1) * Math.PI / 180;
-  const Δλ = (lon2 - lon1) * Math.PI / 180;
-  const a = Math.sin(Δφ / 2) ** 2 +
-            Math.cos(φ1) * Math.cos(φ2) *
-            Math.sin(Δλ / 2) ** 2;
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
-
-// 📌 API: تسجيل الحضور والانصراف
+// 🕒 API لتسجيل الدخول والخروج
 app.post("/attendance", async (req, res) => {
-  const { name, mode, lat, lon } = req.body;
-  if (!name || !mode || !lat || !lon)
-    return res.status(400).json({ message: "❌ البيانات ناقصة" });
-
-  const distance = getDistance(lat, lon, RESTAURANT_LAT, RESTAURANT_LON);
-  if (distance > RADIUS)
-    return res.json({ message: "🚫 يجب أن تكون داخل المطعم لتسجيل الدخول أو الخروج." });
-
   try {
+    const { name, mode, lat, lon } = req.body;
+    if (!name || !mode)
+      return res.status(400).json({ message: "❌ الرجاء إدخال الاسم والوضع." });
+
     const sheet = await accessSheet();
+    const now = new Date();
+    const today = now.toLocaleDateString("en-CA");
+    const timeNow = now.toLocaleTimeString("ar-SA", { hour12: false });
+
     const rows = await sheet.getRows();
-    const today = new Date().toLocaleDateString("ar-SY");
+    const existing = rows.find(r => r.name === name && r.date === today);
 
     if (mode === "in") {
-      const existing = rows.find(r => r.name === name && r.date === today);
-      if (existing) return res.json({ message: "✅ لقد سجلت دخولك مسبقًا اليوم." });
+      if (existing) return res.json({ message: "✅ تم تسجيل دخولك مسبقاً اليوم." });
 
       await sheet.addRow({
         name,
         date: today,
-        in_time: new Date().toLocaleTimeString("ar-SY"),
+        in_time: timeNow,
         out_time: "",
         work_duration: "",
+        lat_in: lat,
+        lon_in: lon
       });
-      return res.json({ message: "✅ تم تسجيل الدخول بنجاح." });
+
+      return res.json({ message: "✅ تم تسجيل دخولك بنجاح." });
     }
 
     if (mode === "out") {
-      const existing = rows.find(r => r.name === name && r.date === today);
-      if (!existing)
-        return res.json({ message: "❌ لم تسجل دخولك اليوم." });
-      if (existing.out_time)
-        return res.json({ message: "⚠️ لقد سجلت خروجك مسبقًا." });
+      if (!existing) return res.json({ message: "⚠️ لم تسجل دخولك اليوم." });
+      if (existing.out_time) return res.json({ message: "✅ تم تسجيل خروجك مسبقاً." });
 
-      const inTime = new Date(`${today} ${existing.in_time}`);
-      const outTime = new Date();
-      const diffMs = outTime - inTime;
-      const hours = Math.floor(diffMs / (1000 * 60 * 60));
-      const minutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
-      const duration = `${hours}س ${minutes}د`;
+      existing.out_time = timeNow;
 
-      existing.out_time = outTime.toLocaleTimeString("ar-SY");
-      existing.work_duration = duration;
+      const [hIn, mIn] = existing.in_time.split(":").map(Number);
+      const [hOut, mOut] = timeNow.split(":").map(Number);
+      const duration = ((hOut * 60 + mOut) - (hIn * 60 + mIn)) / 60;
+
+      existing.work_duration = duration.toFixed(2) + " ساعة";
       await existing.save();
 
-      return res.json({ message: `👋 تم تسجيل الخروج. مدة العمل: ${duration}` });
+      return res.json({ message: "👋 تم تسجيل خروجك. مدة العمل: " + existing.work_duration });
     }
 
+    res.json({ message: "❌ وضع غير معروف." });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ message: "⚠️ حدث خطأ في الخادم." });
+    res.status(500).json({ message: "❌ حدث خطأ في السيرفر." });
   }
 });
 
+// 🔍 فحص سريع
+app.get("/", (req, res) => res.send("✅ Attendance Server Running..."));
+
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
