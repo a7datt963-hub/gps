@@ -7,7 +7,7 @@ const cors = require('cors');
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
-app.use(express.static('public')); // for index.html
+app.use(express.static('public')); // لخدمة index.html
 
 // إعداد المتغيرات البيئية
 const RADIUS = parseFloat(process.env.RADIUS || 50); // بالمتر
@@ -26,7 +26,7 @@ const auth = new google.auth.JWT(
 );
 const sheets = google.sheets({ version: 'v4', auth });
 
-// الدالة لحساب المسافة بين نقطتين باستخدام Haversine Formula
+// دالة لحساب المسافة بين نقطتين
 function getDistanceFromLatLonInMeters(lat1, lon1, lat2, lon2) {
   const R = 6371e3; // نصف قطر الأرض بالمتر
   const φ1 = lat1 * Math.PI / 180;
@@ -41,6 +41,15 @@ function getDistanceFromLatLonInMeters(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
+// ✅ دالة لإرجاع التاريخ والوقت المحلي حسب فارق التوقيت (افتراضي +3)
+function getLocalTime(offsetHours = 3) {
+  const date = new Date();
+  date.setHours(date.getHours() + offsetHours);
+  const today = date.toLocaleDateString('en-CA'); // YYYY-MM-DD
+  const time = date.toLocaleTimeString('en-GB');  // HH:mm:ss
+  return { today, time };
+}
+
 // ➕ تسجيل دخول
 app.post('/checkin', async (req, res) => {
   const { name, lat, lon } = req.body;
@@ -50,9 +59,7 @@ app.post('/checkin', async (req, res) => {
     return res.status(400).json({ message: 'أنت خارج نطاق الموقع المسموح به.' });
   }
 
-  const date = new Date();
-  const today = date.toLocaleDateString('en-CA'); // YYYY-MM-DD
-  const time = date.toLocaleTimeString('en-GB');  // HH:mm:ss
+  const { today, time } = getLocalTime(3); // توقيت محلي +3
 
   try {
     await sheets.spreadsheets.values.append({
@@ -79,9 +86,7 @@ app.post('/checkout', async (req, res) => {
     return res.status(400).json({ message: 'أنت خارج نطاق الموقع المسموح به.' });
   }
 
-  const date = new Date();
-  const today = date.toLocaleDateString('en-CA'); // YYYY-MM-DD
-  const time = date.toLocaleTimeString('en-GB');  // HH:mm:ss
+  const { today, time } = getLocalTime(3); // توقيت محلي +3
 
   try {
     const result = await sheets.spreadsheets.values.get({
@@ -94,7 +99,7 @@ app.post('/checkout', async (req, res) => {
 
     for (let i = rows.length - 1; i >= 0; i--) {
       if (rows[i][0] === name && rows[i][1] === today && !rows[i][3]) {
-        const rowIndex = i + 1; // because sheets are 1-indexed
+        const rowIndex = i + 1; // الصفوف تبدأ من 1
         await sheets.spreadsheets.values.update({
           spreadsheetId: SPREADSHEET_ID,
           range: `Sheet1!D${rowIndex}`,
@@ -122,5 +127,5 @@ app.post('/checkout', async (req, res) => {
 // بدء الخادم
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+  console.log(`✅ Server is running on port ${PORT}`);
 });
