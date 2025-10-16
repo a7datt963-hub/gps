@@ -1,116 +1,126 @@
-import express from "express";
-import cors from "cors";
-import { GoogleSpreadsheet } from "google-spreadsheet";
-import { JWT } from "google-auth-library";
+// server.js
+const express = require('express');
+const bodyParser = require('body-parser');
+const { google } = require('googleapis');
+const cors = require('cors');
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(bodyParser.json());
+app.use(express.static('public')); // for index.html
 
-// 🔹 المتغيرات البيئية
+// إعداد المتغيرات البيئية
+const RADIUS = parseFloat(process.env.RADIUS || 50); // بالمتر
+const RESTAURANT_LAT = parseFloat(process.env.RESTAURANT_LAT);
+const RESTAURANT_LON = parseFloat(process.env.RESTAURANT_LON);
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
-const GOOGLE_SERVICE_ACCOUNT_EMAIL = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-const GOOGLE_PRIVATE_KEY = process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n');
-const RADIUS = Number(process.env.RADIUS || 50);
-const RESTAURANT_LAT = Number(process.env.RESTAURANT_LAT);
-const RESTAURANT_LON = Number(process.env.RESTAURANT_LON);
+const SERVICE_ACCOUNT_EMAIL = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
+const PRIVATE_KEY = process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n');
 
-// 🔐 المصادقة على Google Sheets
-const serviceAccountAuth = new JWT({
-  email: GOOGLE_SERVICE_ACCOUNT_EMAIL,
-  key: GOOGLE_PRIVATE_KEY,
-  scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-});
+// إعداد Google Sheets API
+const auth = new google.auth.JWT(
+  SERVICE_ACCOUNT_EMAIL,
+  null,
+  PRIVATE_KEY,
+  ['https://www.googleapis.com/auth/spreadsheets']
+);
+const sheets = google.sheets({ version: 'v4', auth });
 
-// 📄 دالة للوصول إلى الشيت
-async function accessSheet() {
-  const doc = new GoogleSpreadsheet(SPREADSHEET_ID, serviceAccountAuth);
-  await doc.loadInfo();
-  const sheet = doc.sheetsByIndex[0];
-  await sheet.loadHeaderRow();
-  return sheet;
-}
-
-// 🔹 حساب المسافة بالمتر
-function getDistance(lat1, lon1, lat2, lon2) {
-  const R = 6371e3;
+// الدالة لحساب المسافة بين نقطتين باستخدام Haversine Formula
+function getDistanceFromLatLonInMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371e3; // نصف قطر الأرض بالمتر
   const φ1 = lat1 * Math.PI / 180;
   const φ2 = lat2 * Math.PI / 180;
   const Δφ = (lat2 - lat1) * Math.PI / 180;
   const Δλ = (lon2 - lon1) * Math.PI / 180;
-  const a = Math.sin(Δφ/2)**2 + Math.cos(φ1)*Math.cos(φ2)*Math.sin(Δλ/2)**2;
+
+  const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
+            Math.cos(φ1) * Math.cos(φ2) *
+            Math.sin(Δλ/2) * Math.sin(Δλ/2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
   return R * c;
 }
 
-// 🕒 API لتسجيل الدخول والخروج
-app.post("/attendance", async (req, res) => {
+// ➕ تسجيل دخول
+app.post('/checkin', async (req, res) => {
+  const { name, lat, lon } = req.body;
+
+  const distance = getDistanceFromLatLonInMeters(lat, lon, RESTAURANT_LAT, RESTAURANT_LON);
+  if (distance > RADIUS) {
+    return res.status(400).json({ message: 'أنت خارج نطاق الموقع المسموح به.' });
+  }
+
+  const date = new Date();
+  const today = date.toLocaleDateString('en-CA'); // YYYY-MM-DD
+  const time = date.toLocaleTimeString('en-GB');  // HH:mm:ss
+
   try {
-    const { name, mode, lat, lon } = req.body;
-
-    if (!name || !mode || lat === undefined || lon === undefined)
-      return res.status(400).json({ message: "❌ الرجاء إدخال الاسم والوضع والموقع." });
-
-    // 🔹 التحقق من الموقع
-    const distance = getDistance(lat, lon, RESTAURANT_LAT, RESTAURANT_LON);
-    if (distance > RADIUS) return res.json({ message: "❌ أنت لست داخل المطعم." });
-
-    const sheet = await accessSheet();
-    const rows = await sheet.getRows();
-    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-    const timeNow = new Date().toTimeString().slice(0, 8); // HH:MM:SS
-
-    if (mode === "in") {
-      // البحث عن تسجيل دخول اليوم لنفس الاسم
-      const todayRow = rows.find(r =>
-        r.name?.trim().toLowerCase() === name.trim().toLowerCase() &&
-        r.date === today
-      );
-
-      if (todayRow) return res.json({ message: "✅ تم تسجيل دخولك مسبقاً اليوم." });
-
-      await sheet.addRow({
-        name,
-        date: today,
-        in_time: timeNow,
-        out_time: "",
-        work_duration: ""
-      });
-
-      return res.json({ message: "✅ تم تسجيل دخولك بنجاح." });
-    }
-
-    if (mode === "out") {
-      // البحث عن آخر صف مفتوح (اسم، in_time موجود، out_time فارغ)
-      const openRow = rows
-        .filter(r => r.name?.trim().toLowerCase() === name.trim().toLowerCase())
-        .reverse()
-        .find(r => r.in_time && (!r.out_time || r.out_time.trim() === ""));
-
-      if (!openRow) return res.json({ message: "⚠️ لم تسجل دخولك مسبقاً." });
-
-      openRow.out_time = timeNow;
-
-      // حساب مدة العمل
-      const [hIn, mIn] = openRow.in_time.split(":").map(Number);
-      const [hOut, mOut] = timeNow.split(":").map(Number);
-      const duration = ((hOut * 60 + mOut) - (hIn * 60 + mIn)) / 60;
-      openRow.work_duration = duration.toFixed(2) + " ساعة";
-
-      await openRow.save();
-      return res.json({ message: "👋 تم تسجيل خروجك رافقتك السلامة." });
-    }
-
-    res.json({ message: "❌ وضع غير معروف." });
-
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SPREADSHEET_ID,
+      range: 'Sheet1!A:D',
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[name, today, time, '']],
+      },
+    });
+    res.json({ message: 'تم تسجيل الدخول بنجاح.' });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ message: "❌ حدث خطأ في السيرفر." });
+    res.status(500).json({ message: 'فشل في التسجيل.' });
   }
 });
 
-// 🔹 فحص سريع
-app.get("/", (req, res) => res.send("✅ Attendance Server Running..."));
+// ⛔ تسجيل خروج
+app.post('/checkout', async (req, res) => {
+  const { name, lat, lon } = req.body;
 
+  const distance = getDistanceFromLatLonInMeters(lat, lon, RESTAURANT_LAT, RESTAURANT_LON);
+  if (distance > RADIUS) {
+    return res.status(400).json({ message: 'أنت خارج نطاق الموقع المسموح به.' });
+  }
+
+  const date = new Date();
+  const today = date.toLocaleDateString('en-CA'); // YYYY-MM-DD
+  const time = date.toLocaleTimeString('en-GB');  // HH:mm:ss
+
+  try {
+    const result = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: 'Sheet1!A:D',
+    });
+
+    const rows = result.data.values || [];
+    let updated = false;
+
+    for (let i = rows.length - 1; i >= 0; i--) {
+      if (rows[i][0] === name && rows[i][1] === today && !rows[i][3]) {
+        const rowIndex = i + 1; // because sheets are 1-indexed
+        await sheets.spreadsheets.values.update({
+          spreadsheetId: SPREADSHEET_ID,
+          range: `Sheet1!D${rowIndex}`,
+          valueInputOption: 'USER_ENTERED',
+          requestBody: {
+            values: [[time]],
+          },
+        });
+        updated = true;
+        break;
+      }
+    }
+
+    if (updated) {
+      res.json({ message: 'تم تسجيل الخروج بنجاح.' });
+    } else {
+      res.status(400).json({ message: 'لم يتم تسجيل دخولك اليوم.' });
+    }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'فشل في تسجيل الخروج.' });
+  }
+});
+
+// بدء الخادم
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
+});
